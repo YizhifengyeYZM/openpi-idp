@@ -484,6 +484,14 @@ class TrainConfig:
 
     # Precision for PyTorch training.
     pytorch_training_precision: Literal["bfloat16", "float32"] = "bfloat16"
+    # PyTorch loss objective. "flow" is the original PI0 objective.
+    pytorch_loss_type: Literal["flow", "idp_iso", "idp_geo"] = "flow"
+    # OpenPI time for the expert-proximal IDP branch.
+    pytorch_idp_tau: float = 0.1
+    # Number of real action dimensions for IDP geometry. LIBERO uses 7; None means all model action dimensions.
+    pytorch_valid_action_dim: int | None = None
+    # If true, freeze the PaliGemma vision-language trunk and train only the action expert/projection stack.
+    pytorch_freeze_paligemma: bool = False
 
     lr_schedule: _optimizer.LRScheduleConfig = dataclasses.field(default_factory=_optimizer.CosineDecaySchedule)
     optimizer: _optimizer.OptimizerConfig = dataclasses.field(default_factory=_optimizer.AdamW)

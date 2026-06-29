@@ -1,6 +1,8 @@
 import dataclasses
 import enum
 import logging
+import os
+import pathlib
 import socket
 
 import tyro
@@ -85,12 +87,51 @@ def create_default_policy(env: EnvMode, *, default_prompt: str | None = None) ->
     raise ValueError(f"Unsupported environment mode: {env}")
 
 
+def _apply_checkpoint_config(train_config: _config.TrainConfig, checkpoint_dir: str) -> _config.TrainConfig:
+    metadata_path = pathlib.Path(checkpoint_dir) / "metadata.pt"
+    if not metadata_path.exists():
+        return train_config
+
+    try:
+        import torch
+
+        metadata = torch.load(metadata_path, map_location="cpu", weights_only=False)
+    except Exception as exc:  # noqa: BLE001
+        logging.warning("Could not load checkpoint metadata from %s: %s", metadata_path, exc)
+        return train_config
+
+    checkpoint_config = metadata.get("config", {})
+    overrides = {
+        key: checkpoint_config[key]
+        for key in ("pytorch_loss_type", "pytorch_idp_tau", "pytorch_valid_action_dim", "pytorch_freeze_paligemma")
+        if key in checkpoint_config
+    }
+    if overrides:
+        logging.info("Applying PyTorch checkpoint config overrides: %s", overrides)
+        train_config = dataclasses.replace(train_config, **overrides)
+    return train_config
+
+
 def create_policy(args: Args) -> _policy.Policy:
     """Create a policy from the given arguments."""
     match args.policy:
         case Checkpoint():
+            train_config = _config.get_config(args.policy.config)
+            train_config = _apply_checkpoint_config(train_config, args.policy.dir)
+            if loss_type := os.environ.get("OPENPI_PYTORCH_LOSS_TYPE"):
+                if loss_type not in {"flow", "idp_iso", "idp_geo"}:
+                    raise ValueError(f"Unsupported OPENPI_PYTORCH_LOSS_TYPE: {loss_type}")
+                train_config = dataclasses.replace(train_config, pytorch_loss_type=loss_type)
+            sample_kwargs = None
+            if num_steps := os.environ.get("OPENPI_SAMPLE_NUM_STEPS"):
+                sample_kwargs = {"num_steps": int(num_steps)}
+            if os.environ.get("OPENPI_DISABLE_PYTORCH_COMPILE") == "1":
+                train_config = dataclasses.replace(
+                    train_config,
+                    model=dataclasses.replace(train_config.model, pytorch_compile_mode=None),
+                )
             return _policy_config.create_trained_policy(
-                _config.get_config(args.policy.config), args.policy.dir, default_prompt=args.default_prompt
+                train_config, args.policy.dir, default_prompt=args.default_prompt, sample_kwargs=sample_kwargs
             )
         case Default():
             return create_default_policy(args.env, default_prompt=args.default_prompt)

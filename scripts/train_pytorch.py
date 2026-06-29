@@ -146,6 +146,23 @@ def get_model_parameters(model):
     )
 
 
+def freeze_paligemma_parameters(model):
+    """Freeze the PaliGemma vision-language trunk for action-expert-only experiments."""
+    model_to_freeze = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
+    for param in model_to_freeze.paligemma_with_expert.paligemma.parameters():
+        param.requires_grad = False
+
+
+def trainable_parameters(model):
+    return [param for param in get_model_parameters(model) if param.requires_grad]
+
+
+def parameter_counts(model) -> tuple[int, int]:
+    total = sum(param.numel() for param in get_model_parameters(model))
+    trainable = sum(param.numel() for param in get_model_parameters(model) if param.requires_grad)
+    return total, trainable
+
+
 def save_checkpoint(model, optimizer, global_step, config, is_main, data_config):
     """Save a checkpoint with model state, optimizer state, and metadata."""
     if not is_main:
@@ -370,12 +387,15 @@ def train_loop(config: _config.TrainConfig):
 
         # Create sample images for wandb
         images_to_log = []
+        sample_images = sample_batch.get("images", sample_batch.get("image"))
+        if sample_images is None:
+            raise KeyError("Sample batch does not contain 'images' or 'image' camera tensors.")
         # Get batch size from the first image tensor
-        batch_size = next(iter(sample_batch["image"].values())).shape[0]
+        batch_size = next(iter(sample_images.values())).shape[0]
         for i in range(min(5, batch_size)):
             # Concatenate all camera views horizontally for this batch item
             # Convert from NCHW to NHWC format for wandb
-            img_concatenated = torch.cat([img[i].permute(1, 2, 0) for img in sample_batch["image"].values()], axis=1)
+            img_concatenated = torch.cat([img[i].permute(1, 2, 0) for img in sample_images.values()], axis=1)
             img_concatenated = img_concatenated.cpu().numpy()
             images_to_log.append(wandb.Image(img_concatenated))
 
@@ -429,6 +449,17 @@ def train_loop(config: _config.TrainConfig):
         os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128,expandable_segments:True"
         logging.info("Enabled memory optimizations for 8+ GPU training")
 
+    if config.pytorch_freeze_paligemma:
+        freeze_paligemma_parameters(model)
+        logging.info("Frozen PaliGemma vision-language trunk; training action expert/projection parameters only")
+
+    total_params, trainable_params = parameter_counts(model)
+    if is_main:
+        logging.info(
+            f"Model parameters: trainable={trainable_params:,} / total={total_params:,} "
+            f"({trainable_params / max(total_params, 1):.2%})"
+        )
+
     if use_ddp:
         model = torch.nn.parallel.DistributedDataParallel(
             model,
@@ -455,8 +486,11 @@ def train_loop(config: _config.TrainConfig):
     end_lr = config.lr_schedule.decay_lr
 
     # Create optimizer with config parameters
+    optim_params = trainable_parameters(model)
+    if len(optim_params) == 0:
+        raise ValueError("No trainable parameters remain after applying freeze settings.")
     optim = torch.optim.AdamW(
-        model.parameters(),
+        optim_params,
         lr=peak_lr,
         betas=(config.optimizer.b1, config.optimizer.b2),
         eps=config.optimizer.eps,
@@ -488,6 +522,10 @@ def train_loop(config: _config.TrainConfig):
         )
         logging.info(
             f"Training config: batch_size={config.batch_size}, effective_batch_size={effective_batch_size}, num_train_steps={config.num_train_steps}"
+        )
+        logging.info(
+            f"PyTorch objective: loss_type={config.pytorch_loss_type}, idp_tau={config.pytorch_idp_tau}, "
+            f"valid_action_dim={config.pytorch_valid_action_dim}, freeze_paligemma={config.pytorch_freeze_paligemma}"
         )
         logging.info(f"Memory optimizations: gradient_checkpointing={enable_gradient_checkpointing}")
         logging.info(
@@ -526,7 +564,14 @@ def train_loop(config: _config.TrainConfig):
                 pg["lr"] = lr_schedule(global_step)
 
             # Forward pass
-            losses = model(observation, actions)
+            losses, loss_info = model(
+                observation,
+                actions,
+                loss_type=config.pytorch_loss_type,
+                idp_tau=config.pytorch_idp_tau,
+                idp_valid_action_dim=config.pytorch_valid_action_dim,
+                return_info=True,
+            )
             # Ensure losses is a tensor and handle different return types
             if isinstance(losses, list | tuple):
                 losses = torch.stack(losses)
@@ -543,46 +588,54 @@ def train_loop(config: _config.TrainConfig):
                 log_memory_usage(device, global_step, "after_backward")
 
             # Gradient clipping
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=config.optimizer.clip_gradient_norm)
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                optim_params, max_norm=config.optimizer.clip_gradient_norm
+            )
 
             # Optimizer step
             optim.step()
             optim.zero_grad(set_to_none=True)
 
             # Clear gradients more aggressively
-            for param in model.parameters():
+            for param in optim_params:
                 if param.grad is not None:
                     param.grad.detach_()
                     param.grad = None
 
             # Collect stats
             if is_main:
-                infos.append(
-                    {
-                        "loss": loss.item(),
-                        "learning_rate": optim.param_groups[0]["lr"],
-                        "grad_norm": float(grad_norm) if isinstance(grad_norm, torch.Tensor) else grad_norm,
-                    }
-                )
+                info = {
+                    "loss": loss.item(),
+                    "learning_rate": optim.param_groups[0]["lr"],
+                    "grad_norm": float(grad_norm) if isinstance(grad_norm, torch.Tensor) else grad_norm,
+                }
+                for key, value in loss_info.items():
+                    if isinstance(value, torch.Tensor):
+                        info[key] = float(value.detach().cpu())
+                    else:
+                        info[key] = float(value)
+                infos.append(info)
 
             if is_main and (global_step % config.log_interval == 0):
                 elapsed = time.time() - start_time
 
                 # Average stats over log interval
-                avg_loss = sum(info["loss"] for info in infos) / len(infos)
-                avg_lr = sum(info["learning_rate"] for info in infos) / len(infos)
-
-                avg_grad_norm = None
-                if any("grad_norm" in info for info in infos):
-                    vals = [
-                        info["grad_norm"] for info in infos if "grad_norm" in info and info["grad_norm"] is not None
-                    ]
+                avg_metrics = {}
+                for key in sorted({key for info in infos for key in info}):
+                    vals = [info[key] for info in infos if key in info and info[key] is not None]
                     if len(vals) > 0:
-                        avg_grad_norm = sum(vals) / len(vals)
+                        avg_metrics[key] = sum(vals) / len(vals)
+                avg_loss = avg_metrics["loss"]
+                avg_lr = avg_metrics["learning_rate"]
+                avg_grad_norm = avg_metrics.get("grad_norm")
+                extra_log = ""
+                for key in ("loss_idp_zero", "loss_idp_tau", "idp_metric_excess_mean", "idp_n_eff_mean"):
+                    if key in avg_metrics:
+                        extra_log += f" {key}={avg_metrics[key]:.4f}"
                 logging.info(
-                    f"step={global_step} loss={avg_loss:.4f} lr={avg_lr:.2e} grad_norm={avg_grad_norm:.2f} time={elapsed:.1f}s"
+                    f"step={global_step} loss={avg_loss:.4f} lr={avg_lr:.2e} grad_norm={avg_grad_norm:.2f} time={elapsed:.1f}s{extra_log}"
                     if avg_grad_norm is not None
-                    else f"step={global_step} loss={avg_loss:.4f} lr={avg_lr:.2e} time={elapsed:.1f}s"
+                    else f"step={global_step} loss={avg_loss:.4f} lr={avg_lr:.2e} time={elapsed:.1f}s{extra_log}"
                 )
 
                 # Log to wandb
@@ -593,8 +646,7 @@ def train_loop(config: _config.TrainConfig):
                         "step": global_step,
                         "time_per_step": elapsed / config.log_interval,
                     }
-                    if avg_grad_norm is not None:
-                        log_payload["grad_norm"] = avg_grad_norm
+                    log_payload.update({key: value for key, value in avg_metrics.items() if key not in log_payload})
                     wandb.log(log_payload, step=global_step)
 
                 start_time = time.time()

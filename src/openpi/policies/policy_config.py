@@ -53,6 +53,11 @@ def create_trained_policy(
     if is_pytorch:
         model = train_config.model.load_pytorch(train_config, weight_path)
         model.paligemma_with_expert.to_bfloat16_for_selected_params("bfloat16")
+        if train_config.pytorch_loss_type in {"idp_iso", "idp_geo"}:
+            if not hasattr(model, "sample_actions_idp_one_step"):
+                raise AttributeError("IDP PyTorch policy requires sample_actions_idp_one_step.")
+            logging.info("Using one-step IDP sampler for PyTorch policy inference.")
+            model.sample_actions = model.sample_actions_idp_one_step
     else:
         model = train_config.model.load(_model.restore_params(checkpoint_dir / "params", dtype=jnp.bfloat16))
     data_config = train_config.data.create(train_config.assets_dirs, train_config.model)

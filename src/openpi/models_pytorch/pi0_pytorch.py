@@ -184,6 +184,67 @@ class PI0Pytorch(nn.Module):
         time = time_beta * 0.999 + 0.001
         return time.to(dtype=torch.float32, device=device)
 
+    def _idp_metric_diag(
+        self,
+        context: torch.Tensor,
+        actions: torch.Tensor,
+        *,
+        valid_action_dim: int | None = None,
+        eps: float = 1e-6,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """Build a detached diagonal IDP metric from the current batch."""
+        batch_size, horizon, action_dim = actions.shape
+        metric_diag = torch.ones_like(actions)
+        valid_dim = action_dim if valid_action_dim is None else min(valid_action_dim, action_dim)
+        if batch_size < 2 or valid_dim <= 0:
+            return metric_diag, {
+                "idp_metric_active_frac": torch.zeros((), device=actions.device),
+                "idp_n_eff_mean": torch.ones((), device=actions.device),
+            }
+
+        context_feat = context.reshape(batch_size, -1).detach().float()
+        context_feat = F.normalize(context_feat, dim=-1, eps=eps)
+        act_flat = actions[..., :valid_dim].reshape(batch_size, horizon * valid_dim).detach().float()
+
+        sim = context_feat @ context_feat.transpose(0, 1)
+        sim_mean = sim.mean(dim=1, keepdim=True)
+        sim_std = sim.std(dim=1, keepdim=True, unbiased=False).clamp_min(eps)
+        weights = ((sim - sim_mean) / sim_std).softmax(dim=1)
+
+        second_diag = weights @ act_flat.pow(2)
+        local_mean = weights @ act_flat
+        local_var = (second_diag - 2.0 * local_mean * act_flat + act_flat.pow(2)).clamp_min(eps)
+
+        global_mean = act_flat.mean(dim=0, keepdim=True)
+        global_var = (act_flat - global_mean).pow(2).mean(dim=0).clamp_min(eps)
+
+        local_var_mean = local_var.mean(dim=-1, keepdim=True).clamp_min(eps)
+        global_var_mean = global_var.mean().clamp_min(eps)
+
+        local_scale = torch.sqrt(local_var_mean / (local_var + eps))
+        local_scale = local_scale / local_scale.mean(dim=-1, keepdim=True).clamp_min(eps)
+        global_scale = torch.sqrt(global_var_mean / (global_var + eps))
+        global_scale = global_scale / global_scale.mean().clamp_min(eps)
+
+        metric_excess = F.relu(local_scale / global_scale.unsqueeze(0).clamp_min(eps) - 1.0).detach()
+        metric_diag[..., :valid_dim] = (1.0 + metric_excess).to(actions.dtype).reshape(
+            batch_size, horizon, valid_dim
+        )
+
+        n_eff = 1.0 / weights.pow(2).sum(dim=1).clamp_min(1e-12)
+        stats = {
+            "idp_w_self_mean": weights.diagonal().mean().detach(),
+            "idp_n_eff_mean": n_eff.mean().detach(),
+            "idp_top1_mass_mean": weights.max(dim=1).values.mean().detach(),
+            "idp_top5_mass_mean": weights.topk(min(5, batch_size), dim=1).values.sum(dim=1).mean().detach(),
+            "idp_local_var_mean": local_var.mean().detach(),
+            "idp_global_var_mean": global_var.mean().detach(),
+            "idp_metric_excess_mean": metric_excess.mean().detach(),
+            "idp_metric_excess_max_mean": metric_excess.max(dim=-1).values.mean().detach(),
+            "idp_metric_active_frac": (metric_excess > 0).float().mean().detach(),
+        }
+        return metric_diag.detach(), stats
+
     def embed_prefix(
         self, images, img_masks, lang_tokens, lang_masks
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -314,20 +375,18 @@ class PI0Pytorch(nn.Module):
 
         return embs, pad_masks, att_masks, adarms_cond
 
-    def forward(self, observation, actions, noise=None, time=None) -> Tensor:
-        """Do a full training forward pass and compute the loss (batch_size x num_steps x num_motors)"""
-        images, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(observation, train=True)
-
-        if noise is None:
-            noise = self.sample_noise(actions.shape, actions.device)
-
-        if time is None:
-            time = self.sample_time(actions.shape[0], actions.device)
-
-        time_expanded = time[:, None, None]
-        x_t = time_expanded * noise + (1 - time_expanded) * actions
-        u_t = noise - actions
-
+    def _compute_velocity_from_preprocessed(
+        self,
+        images,
+        img_masks,
+        lang_tokens,
+        lang_masks,
+        state,
+        x_t,
+        time,
+        *,
+        return_hidden: bool = False,
+    ):
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
         suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t, time)
         if (
@@ -371,7 +430,121 @@ class PI0Pytorch(nn.Module):
 
         v_t = self._apply_checkpoint(action_out_proj_func, suffix_out)
 
-        return F.mse_loss(u_t, v_t, reduction="none")
+        if return_hidden:
+            return v_t, suffix_out
+        return v_t
+
+    def velocity_forward(self, observation, x_t, time, *, train: bool = True, return_hidden: bool = False):
+        """Run the PI0 velocity network at a specific action/time point."""
+        images, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(observation, train=train)
+        return self._compute_velocity_from_preprocessed(
+            images,
+            img_masks,
+            lang_tokens,
+            lang_masks,
+            state,
+            x_t,
+            time,
+            return_hidden=return_hidden,
+        )
+
+    def forward(
+        self,
+        observation,
+        actions,
+        noise=None,
+        time=None,
+        *,
+        loss_type: str = "flow",
+        idp_tau: float = 0.1,
+        idp_valid_action_dim: int | None = None,
+        return_info: bool = False,
+    ) -> Tensor:
+        """Compute PI0 flow, IDP-isotropic, or IDP-geometry training losses."""
+        images, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(observation, train=True)
+
+        if loss_type == "flow":
+            if noise is None:
+                noise = self.sample_noise(actions.shape, actions.device)
+
+            if time is None:
+                time = self.sample_time(actions.shape[0], actions.device)
+
+            time_expanded = time[:, None, None]
+            x_t = time_expanded * noise + (1 - time_expanded) * actions
+            u_t = noise - actions
+            v_t = self._compute_velocity_from_preprocessed(
+                images, img_masks, lang_tokens, lang_masks, state, x_t, time
+            )
+            losses = F.mse_loss(u_t, v_t, reduction="none")
+            if return_info:
+                return losses, {"loss_flow": losses.mean().detach()}
+            return losses
+
+        if loss_type not in {"idp_iso", "idp_geo"}:
+            raise ValueError(f"Unsupported PI0 PyTorch loss_type: {loss_type}")
+        if not 0.0 < idp_tau <= 1.0:
+            raise ValueError(f"idp_tau must be in (0, 1], got {idp_tau}")
+
+        batch_size = actions.shape[0]
+        time_zero_input = torch.ones(batch_size, dtype=torch.float32, device=actions.device)
+        x_zero = torch.zeros_like(actions)
+        v_zero, hidden_zero = self._compute_velocity_from_preprocessed(
+            images,
+            img_masks,
+            lang_tokens,
+            lang_masks,
+            state,
+            x_zero,
+            time_zero_input,
+            return_hidden=True,
+        )
+        action_pred_zero = -v_zero
+
+        if noise is None:
+            noise = self.sample_noise(actions.shape, actions.device)
+        time_tau = torch.full((batch_size,), float(idp_tau), dtype=torch.float32, device=actions.device)
+        x_tau = actions + float(idp_tau) * noise
+        v_tau = self._compute_velocity_from_preprocessed(
+            images, img_masks, lang_tokens, lang_masks, state, x_tau, time_tau
+        )
+        action_pred_tau = x_tau - float(idp_tau) * v_tau
+
+        if loss_type == "idp_geo":
+            context = hidden_zero.mean(dim=1)
+            metric_diag, info = self._idp_metric_diag(
+                context, actions, valid_action_dim=idp_valid_action_dim
+            )
+        else:
+            metric_diag = torch.ones_like(actions)
+            info = {}
+
+        zero_residual = action_pred_zero - actions
+        tau_residual = (action_pred_tau - actions) / float(idp_tau)
+        losses_zero = metric_diag * zero_residual.pow(2)
+        losses_tau = metric_diag * tau_residual.pow(2)
+        losses = 0.5 * (losses_zero + losses_tau)
+
+        if return_info:
+            with torch.no_grad():
+                info = {
+                    **info,
+                    "loss_idp_zero": losses_zero.mean().detach(),
+                    "loss_idp_tau": losses_tau.mean().detach(),
+                    "idp_zero_l2": zero_residual.reshape(batch_size, -1).norm(dim=-1).mean().detach(),
+                    "idp_tau_l2": (action_pred_tau - actions).reshape(batch_size, -1).norm(dim=-1).mean().detach(),
+                }
+            return losses, info
+        return losses
+
+    @torch.no_grad()
+    def sample_actions_idp_one_step(self, device, observation) -> Tensor:
+        """One-step IDP deployment sampler: action = -v_theta(o, 0, t=1)."""
+        bsize = observation.state.shape[0]
+        actions_shape = (bsize, self.config.action_horizon, self.config.action_dim)
+        x_t = torch.zeros(actions_shape, dtype=torch.float32, device=device)
+        time = torch.ones(bsize, dtype=torch.float32, device=device)
+        return -self.velocity_forward(observation, x_t, time, train=False)
 
     @torch.no_grad()
     def sample_actions(self, device, observation, noise=None, num_steps=10) -> Tensor:
