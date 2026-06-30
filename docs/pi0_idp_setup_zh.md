@@ -204,6 +204,20 @@ cd "$OPENPI_ROOT"
 OPENPI_CACHE="$OPENPI_CACHE" scripts/download_libero_wget.sh
 ```
 
+如果 `wget` 报公司网关自签证书，例如 `Self-signed certificate encountered`，先尝试找管理员要公司 CA 文件，然后：
+
+```bash
+OPENPI_CACHE="$OPENPI_CACHE" scripts/download_libero_wget.sh \
+  --ca-certificate /path/to/company-ca.pem
+```
+
+如果暂时拿不到 CA 文件，只能先绕过证书校验：
+
+```bash
+OPENPI_CACHE="$OPENPI_CACHE" scripts/download_libero_wget.sh \
+  --no-check-certificate
+```
+
 脚本会下载到：
 
 ```text
@@ -284,6 +298,13 @@ OpenPI 官方 `pi0_base` 在 GCS 上，但公开对象可以通过 `https://stor
 ```bash
 cd "$OPENPI_ROOT"
 OPENPI_CACHE="$OPENPI_CACHE" scripts/download_pi0_base_wget.sh
+```
+
+如果同样遇到公司网关自签证书：
+
+```bash
+OPENPI_CACHE="$OPENPI_CACHE" scripts/download_pi0_base_wget.sh \
+  --no-check-certificate
 ```
 
 脚本会完成两步：

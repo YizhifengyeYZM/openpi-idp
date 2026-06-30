@@ -15,6 +15,11 @@ Options:
   --base-url URL      File base URL. Default:
                       https://huggingface.co/datasets/physical-intelligence/libero/resolve/main
   --manifest FILE     File list. Default: docs/libero_hf_paths.txt.
+  --no-check-certificate
+                      Pass wget --no-check-certificate. Useful behind a corporate
+                      HTTPS inspection gateway with an untrusted internal CA.
+  --ca-certificate FILE
+                      Pass wget --ca-certificate FILE.
   --check-only        Do not download; only check local files.
   --no-verify         Skip offline LeRobotDataset verification.
   -h, --help          Show this help.
@@ -26,6 +31,9 @@ Environment:
   LIBERO_DIR          Same as --dest.
   LIBERO_BASE_URL     Same as --base-url.
   HF_TOKEN            Optional token; only used as a wget Authorization header.
+  WGET_NO_CHECK_CERTIFICATE=1
+                      Same as --no-check-certificate.
+  WGET_CA_CERTIFICATE Same as --ca-certificate.
 USAGE
 }
 
@@ -33,6 +41,8 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 manifest="$repo_root/docs/libero_hf_paths.txt"
 base_url="${LIBERO_BASE_URL:-https://huggingface.co/datasets/physical-intelligence/libero/resolve/main}"
 dest="${LIBERO_DIR:-}"
+no_check_certificate="${WGET_NO_CHECK_CERTIFICATE:-0}"
+ca_certificate="${WGET_CA_CERTIFICATE:-}"
 verify=1
 check_only=0
 
@@ -48,6 +58,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --manifest)
       manifest="$2"
+      shift 2
+      ;;
+    --no-check-certificate)
+      no_check_certificate=1
+      shift
+      ;;
+    --ca-certificate)
+      ca_certificate="$2"
       shift 2
       ;;
     --check-only)
@@ -102,6 +120,11 @@ echo "LIBERO destination: $dest"
 echo "Manifest: $manifest"
 echo "Base URL: ${base_url%/}"
 echo "For later training shells: export HF_LEROBOT_HOME=\"$HF_LEROBOT_HOME\""
+if [[ "$no_check_certificate" == "1" ]]; then
+  echo "wget certificate verification: disabled (--no-check-certificate)"
+elif [[ -n "$ca_certificate" ]]; then
+  echo "wget CA certificate: $ca_certificate"
+fi
 if env | grep -qi '_proxy='; then
   echo "Proxy variables detected:"
   env | grep -i '_proxy=' | sed 's/=.*/=<set>/'
@@ -134,6 +157,11 @@ download_one() {
 
   if [[ -n "${HF_TOKEN:-}" ]]; then
     args=(--header="Authorization: Bearer ${HF_TOKEN}" "${args[@]}")
+  fi
+  if [[ "$no_check_certificate" == "1" ]]; then
+    args=(--no-check-certificate "${args[@]}")
+  elif [[ -n "$ca_certificate" ]]; then
+    args=(--ca-certificate="$ca_certificate" "${args[@]}")
   fi
 
   wget "${args[@]}"

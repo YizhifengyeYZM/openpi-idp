@@ -17,6 +17,11 @@ Options:
   --base-url URL      File base URL. Default:
                       https://storage.googleapis.com/openpi-assets/checkpoints/pi0_base/params
   --manifest FILE     File list. Default: docs/pi0_base_jax_paths.txt.
+  --no-check-certificate
+                      Pass wget --no-check-certificate. Useful behind a corporate
+                      HTTPS inspection gateway with an untrusted internal CA.
+  --ca-certificate FILE
+                      Pass wget --ca-certificate FILE.
   --download-only     Download JAX checkpoint, but do not convert.
   --force-convert     Re-run conversion even if model.safetensors already exists.
   --check-only        Do not download; only check local files.
@@ -28,6 +33,9 @@ Environment:
   PI0_BASE_JAX        Same as --jax-dir.
   PI0_BASE_PT         Same as --pt-dir.
   PI0_BASE_BASE_URL   Same as --base-url.
+  WGET_NO_CHECK_CERTIFICATE=1
+                      Same as --no-check-certificate.
+  WGET_CA_CERTIFICATE Same as --ca-certificate.
 USAGE
 }
 
@@ -36,6 +44,8 @@ manifest="$repo_root/docs/pi0_base_jax_paths.txt"
 base_url="${PI0_BASE_BASE_URL:-https://storage.googleapis.com/openpi-assets/checkpoints/pi0_base/params}"
 jax_dir="${PI0_BASE_JAX:-}"
 pt_dir="${PI0_BASE_PT:-}"
+no_check_certificate="${WGET_NO_CHECK_CERTIFICATE:-0}"
+ca_certificate="${WGET_CA_CERTIFICATE:-}"
 download_only=0
 force_convert=0
 check_only=0
@@ -56,6 +66,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --manifest)
       manifest="$2"
+      shift 2
+      ;;
+    --no-check-certificate)
+      no_check_certificate=1
+      shift
+      ;;
+    --ca-certificate)
+      ca_certificate="$2"
       shift 2
       ;;
     --download-only)
@@ -107,6 +125,11 @@ echo "Manifest: $manifest"
 echo "Base URL: ${base_url%/}"
 echo "For later training shells: export OPENPI_DATA_HOME=\"$OPENPI_DATA_HOME\""
 echo "For training: --pytorch_weight_path \"$pt_dir\""
+if [[ "$no_check_certificate" == "1" ]]; then
+  echo "wget certificate verification: disabled (--no-check-certificate)"
+elif [[ -n "$ca_certificate" ]]; then
+  echo "wget CA certificate: $ca_certificate"
+fi
 
 download_one() {
   local path="$1"
@@ -122,14 +145,24 @@ download_one() {
   fi
 
   echo "[download] $path"
-  wget -c \
-    --tries=0 \
-    --connect-timeout=30 \
-    --read-timeout=120 \
-    --waitretry=10 \
-    --retry-connrefused \
-    -O "$tmp" \
+  local args=(
+    -c
+    --tries=0
+    --connect-timeout=30
+    --read-timeout=120
+    --waitretry=10
+    --retry-connrefused
+    -O "$tmp"
     "$url"
+  )
+
+  if [[ "$no_check_certificate" == "1" ]]; then
+    args=(--no-check-certificate "${args[@]}")
+  elif [[ -n "$ca_certificate" ]]; then
+    args=(--ca-certificate="$ca_certificate" "${args[@]}")
+  fi
+
+  wget "${args[@]}"
   mv "$tmp" "$out"
 }
 
