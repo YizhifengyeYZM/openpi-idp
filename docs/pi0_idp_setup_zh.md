@@ -342,6 +342,40 @@ scripts/download_pi0_base_wget.sh --download-only
 scripts/download_pi0_base_wget.sh --force-convert
 ```
 
+### 4.2 下载完成后的下一步脚本
+
+上面这些步骤完成后，不需要手打验证和 smoke test 命令，直接用总控脚本：
+
+```bash
+cd "$OPENPI_ROOT"
+OPENPI_CACHE="$OPENPI_CACHE" scripts/cluster_next_step.sh \
+  --no-check-certificate \
+  --jobs 8
+```
+
+默认会依次执行：
+
+```text
+检查 LIBERO 本地文件和离线加载
+准备 pi0_base PyTorch checkpoint
+跑 10-step smoke_flow 训练
+```
+
+如果只做某一步：
+
+```bash
+scripts/cluster_next_step.sh verify --no-check-certificate --jobs 8
+scripts/cluster_next_step.sh prepare-pi0 --no-check-certificate --jobs 4
+scripts/cluster_next_step.sh smoke --no-check-certificate --jobs 8 --gpu 0
+```
+
+smoke test 通过后，正式 flow / IDP 也可以直接用脚本启动：
+
+```bash
+scripts/cluster_next_step.sh train-flow --gpu 0
+scripts/cluster_next_step.sh train-idp --gpu 1
+```
+
 ## 5. norm stats / assets
 
 训练和推理都需要 `pi0_libero` 的 normalization stats。仓库里通常已经有：
