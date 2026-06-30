@@ -30,6 +30,7 @@ import os
 import platform
 import shutil
 import time
+import warnings
 
 import jax
 import numpy as np
@@ -38,7 +39,11 @@ import torch
 import torch.distributed as dist
 import torch.nn.parallel
 import tqdm
+import urllib3.exceptions
 import wandb
+
+warnings.filterwarnings("ignore", category=urllib3.exceptions.InsecureRequestWarning)
+warnings.filterwarnings("ignore", message=".*Disabling SSL verification.*")
 
 import openpi.models.pi0_config
 import openpi.models_pytorch.pi0_pytorch
@@ -426,7 +431,10 @@ def train_loop(config: _config.TrainConfig):
         # Update dtype to match pytorch_training_precision
         object.__setattr__(model_cfg, "dtype", config.pytorch_training_precision)
 
+    model_start = time.time()
+    logging.info(f"Building PyTorch pi0 model on {device}")
     model = openpi.models_pytorch.pi0_pytorch.PI0Pytorch(model_cfg).to(device)
+    logging.info(f"Built PyTorch pi0 model in {time.time() - model_start:.1f}s")
 
     if hasattr(model, "gradient_checkpointing_enable"):
         enable_gradient_checkpointing = True
@@ -461,6 +469,8 @@ def train_loop(config: _config.TrainConfig):
         )
 
     if use_ddp:
+        ddp_start = time.time()
+        logging.info("Wrapping model with DistributedDataParallel")
         model = torch.nn.parallel.DistributedDataParallel(
             model,
             device_ids=[device.index] if device.type == "cuda" else None,
@@ -468,16 +478,18 @@ def train_loop(config: _config.TrainConfig):
             gradient_as_bucket_view=True,  # Enable for memory efficiency
             static_graph=world_size >= 8,  # Enable for 8+ GPUs
         )
+        logging.info(f"Wrapped model with DistributedDataParallel in {time.time() - ddp_start:.1f}s")
 
     # Load weights from weight_loader if specified (for fine-tuning)
     if config.pytorch_weight_path is not None:
         logging.info(f"Loading weights from: {config.pytorch_weight_path}")
 
         model_path = os.path.join(config.pytorch_weight_path, "model.safetensors")
+        load_start = time.time()
         safetensors.torch.load_model(
             (model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model), model_path
         )
-        logging.info(f"Loaded PyTorch weights from {config.pytorch_weight_path}")
+        logging.info(f"Loaded PyTorch weights from {config.pytorch_weight_path} in {time.time() - load_start:.1f}s")
 
     # Optimizer + learning rate schedule from config
     warmup_steps = config.lr_schedule.warmup_steps
@@ -489,6 +501,8 @@ def train_loop(config: _config.TrainConfig):
     optim_params = trainable_parameters(model)
     if len(optim_params) == 0:
         raise ValueError("No trainable parameters remain after applying freeze settings.")
+    optim_start = time.time()
+    logging.info("Creating AdamW optimizer")
     optim = torch.optim.AdamW(
         optim_params,
         lr=peak_lr,
@@ -496,6 +510,7 @@ def train_loop(config: _config.TrainConfig):
         eps=config.optimizer.eps,
         weight_decay=config.optimizer.weight_decay,
     )
+    logging.info(f"Created AdamW optimizer in {time.time() - optim_start:.1f}s")
 
     # Load checkpoint if resuming
     global_step = 0
@@ -536,6 +551,7 @@ def train_loop(config: _config.TrainConfig):
         )
         logging.info("EMA is not supported for PyTorch training")
         logging.info(f"Training precision: {model_cfg.dtype}")
+        logging.info("Entering training loop")
 
     # Training loop - iterate until we reach num_train_steps
     pbar = (

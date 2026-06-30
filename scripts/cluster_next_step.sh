@@ -146,6 +146,13 @@ export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$OPENPI_CACHE/xdg}"
 export OPENPI_DATA_HOME="${OPENPI_DATA_HOME:-$OPENPI_CACHE/openpi}"
 export OPENPI_CKPT_HOME="${OPENPI_CKPT_HOME:-$OPENPI_CACHE/openpi_checkpoints}"
 export LEROBOT_VIDEO_BACKEND="${LEROBOT_VIDEO_BACKEND:-pyav}"
+export WANDB_QUIET="${WANDB_QUIET:-true}"
+ssl_warning_filters="ignore:Unverified HTTPS request,ignore:Disabling SSL verification"
+if [[ -n "${PYTHONWARNINGS:-}" ]]; then
+  export PYTHONWARNINGS="$PYTHONWARNINGS,$ssl_warning_filters"
+else
+  export PYTHONWARNINGS="$ssl_warning_filters"
+fi
 unset HF_ENDPOINT HF_HUB_ENDPOINT
 
 if [[ -n "$gpu" ]]; then
