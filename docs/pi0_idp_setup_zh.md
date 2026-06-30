@@ -367,7 +367,20 @@ OPENPI_CACHE="$OPENPI_CACHE" scripts/cluster_next_step.sh \
 scripts/cluster_next_step.sh verify --no-check-certificate --jobs 8
 scripts/cluster_next_step.sh prepare-pi0 --no-check-certificate --jobs 4
 scripts/cluster_next_step.sh prepare-tokenizer --no-check-certificate
+scripts/cluster_next_step.sh prepare-norm-stats
 scripts/cluster_next_step.sh smoke --no-check-certificate --jobs 8 --gpu 0
+```
+
+LeRobot 提示 `physical-intelligence/libero` 是 2.0 数据集、当前代码兼容 2.1，这是 warning，不需要先升级数据集。真正会阻塞训练的是缺少 `assets/pi0_libero/physical-intelligence/libero/norm_stats.json`。总控脚本会在训练前检查；如果缺失，会自动运行：
+
+```bash
+uv run scripts/compute_norm_stats.py --config-name pi0_libero
+```
+
+也可以单独跑：
+
+```bash
+scripts/cluster_next_step.sh prepare-norm-stats
 ```
 
 如果 smoke test 卡在 `paligemma_tokenizer.model`，说明 tokenizer 还没有提前下载到 `$OPENPI_DATA_HOME/big_vision/paligemma_tokenizer.model`。更新代码后直接跑：
