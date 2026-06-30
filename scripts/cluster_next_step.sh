@@ -11,6 +11,8 @@ Default command:
 Commands:
   verify        Check LIBERO files and offline LeRobotDataset loading.
   prepare-pi0   Download/convert pi0_base if needed.
+  prepare-tokenizer
+                Download PaliGemma tokenizer if needed.
   smoke         Verify LIBERO, prepare pi0_base, then run a 10-step smoke train. Default.
   train-flow    Run full flow fine-tuning.
   train-idp     Run full IDP-Geo fine-tuning.
@@ -125,7 +127,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$command" in
-  verify|prepare-pi0|smoke|train-flow|train-idp)
+  verify|prepare-pi0|prepare-tokenizer|smoke|train-flow|train-idp)
     ;;
   *)
     echo "Unknown command: $command" >&2
@@ -158,6 +160,7 @@ elif [[ -n "$ca_certificate" ]]; then
 fi
 
 pi0_base_pt="$OPENPI_DATA_HOME/pytorch/pi0_base_pytorch"
+paligemma_tokenizer="$OPENPI_DATA_HOME/big_vision/paligemma_tokenizer.model"
 
 print_env() {
   echo "OPENPI_CACHE=$OPENPI_CACHE"
@@ -177,6 +180,11 @@ prepare_pi0() {
   "$repo_root/scripts/download_pi0_base_wget.sh" "${download_args[@]}"
 }
 
+prepare_tokenizer() {
+  echo "== Prepare PaliGemma tokenizer =="
+  "$repo_root/scripts/download_paligemma_tokenizer_wget.sh" "${download_args[@]}"
+}
+
 run_train() {
   local mode="$1"
   local default_exp="$2"
@@ -193,6 +201,9 @@ run_train() {
     echo "Missing pi0 base PyTorch checkpoint: $pi0_base_pt/model.safetensors" >&2
     echo "Run: scripts/cluster_next_step.sh prepare-pi0" >&2
     exit 1
+  fi
+  if [[ ! -f "$paligemma_tokenizer" ]]; then
+    prepare_tokenizer
   fi
 
   train_args=(
@@ -244,16 +255,22 @@ case "$command" in
   prepare-pi0)
     prepare_pi0
     ;;
+  prepare-tokenizer)
+    prepare_tokenizer
+    ;;
   smoke)
     verify_libero
     prepare_pi0
+    prepare_tokenizer
     overwrite=1
     run_train flow "${exp_name:-smoke_flow}" "${steps:-10}" "${batch_size:-8}" "${num_workers:-4}"
     ;;
   train-flow)
+    prepare_tokenizer
     run_train flow "${exp_name:-flow_full_30k}" "${steps:-30000}" "${batch_size:-32}" "${num_workers:-8}"
     ;;
   train-idp)
+    prepare_tokenizer
     run_train idp_geo "${exp_name:-idp_geo_full_30k}" "${steps:-30000}" "${batch_size:-32}" "${num_workers:-8}"
     ;;
 esac

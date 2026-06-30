@@ -366,6 +366,19 @@ OPENPI_CACHE="$OPENPI_CACHE" scripts/cluster_next_step.sh \
 ```bash
 scripts/cluster_next_step.sh verify --no-check-certificate --jobs 8
 scripts/cluster_next_step.sh prepare-pi0 --no-check-certificate --jobs 4
+scripts/cluster_next_step.sh prepare-tokenizer --no-check-certificate
+scripts/cluster_next_step.sh smoke --no-check-certificate --jobs 8 --gpu 0
+```
+
+如果 smoke test 卡在 `paligemma_tokenizer.model`，说明 tokenizer 还没有提前下载到 `$OPENPI_DATA_HOME/big_vision/paligemma_tokenizer.model`。更新代码后直接跑：
+
+```bash
+scripts/cluster_next_step.sh prepare-tokenizer --no-check-certificate
+```
+
+之后再重跑：
+
+```bash
 scripts/cluster_next_step.sh smoke --no-check-certificate --jobs 8 --gpu 0
 ```
 
