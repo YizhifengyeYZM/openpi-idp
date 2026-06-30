@@ -217,14 +217,16 @@ OPENPI_CACHE="$OPENPI_CACHE" scripts/download_libero_wget.sh \
 
 ```bash
 OPENPI_CACHE="$OPENPI_CACHE" scripts/download_libero_wget.sh \
-  --no-check-certificate
+  --no-check-certificate \
+  --jobs 8
 ```
 
-如果想限制最多重试 20 轮，每轮之间等 120 秒：
+`--jobs 8` 会并发下载 8 个文件；如果公司代理开始 429、502、504 或频繁断，把它降到 `--jobs 4`。如果想限制最多重试 20 轮，每轮之间等 120 秒：
 
 ```bash
 OPENPI_CACHE="$OPENPI_CACHE" scripts/download_libero_wget.sh \
   --no-check-certificate \
+  --jobs 8 \
   --max-passes 20 \
   --retry-sleep 120
 ```
@@ -317,7 +319,8 @@ OPENPI_CACHE="$OPENPI_CACHE" scripts/download_pi0_base_wget.sh
 
 ```bash
 OPENPI_CACHE="$OPENPI_CACHE" scripts/download_pi0_base_wget.sh \
-  --no-check-certificate
+  --no-check-certificate \
+  --jobs 4
 ```
 
 脚本会完成两步：

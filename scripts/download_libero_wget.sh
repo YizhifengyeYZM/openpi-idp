@@ -24,6 +24,7 @@ Options:
                       meaning retry until complete.
   --retry-sleep SEC   Seconds to sleep between incomplete passes. Default: 60.
   --wget-tries N      Per-file wget tries in each pass. Default: 20.
+  --jobs N            Parallel wget jobs per pass. Default: 1.
   --check-only        Do not download; only check local files.
   --no-verify         Skip offline LeRobotDataset verification.
   -h, --help          Show this help.
@@ -42,6 +43,7 @@ Environment:
   DOWNLOAD_RETRY_SLEEP
                       Same as --retry-sleep.
   WGET_TRIES          Same as --wget-tries.
+  DOWNLOAD_JOBS       Same as --jobs.
 USAGE
 }
 
@@ -54,6 +56,7 @@ ca_certificate="${WGET_CA_CERTIFICATE:-}"
 max_passes="${DOWNLOAD_MAX_PASSES:-0}"
 retry_sleep="${DOWNLOAD_RETRY_SLEEP:-60}"
 wget_tries="${WGET_TRIES:-20}"
+jobs="${DOWNLOAD_JOBS:-1}"
 verify=1
 check_only=0
 
@@ -91,6 +94,10 @@ while [[ $# -gt 0 ]]; do
       wget_tries="$2"
       shift 2
       ;;
+    --jobs)
+      jobs="$2"
+      shift 2
+      ;;
     --check-only)
       check_only=1
       shift
@@ -114,6 +121,10 @@ done
 if [[ ! -f "$manifest" ]]; then
   echo "Manifest not found: $manifest" >&2
   exit 1
+fi
+if ! [[ "$jobs" =~ ^[0-9]+$ ]] || [[ "$jobs" -lt 1 ]]; then
+  echo "--jobs must be a positive integer, got: $jobs" >&2
+  exit 2
 fi
 
 if [[ -z "$dest" ]]; then
@@ -143,7 +154,7 @@ echo "LIBERO destination: $dest"
 echo "Manifest: $manifest"
 echo "Base URL: ${base_url%/}"
 echo "For later training shells: export HF_LEROBOT_HOME=\"$HF_LEROBOT_HOME\""
-echo "Retry policy: max_passes=$max_passes, retry_sleep=${retry_sleep}s, wget_tries=$wget_tries"
+echo "Retry policy: max_passes=$max_passes, retry_sleep=${retry_sleep}s, wget_tries=$wget_tries, jobs=$jobs"
 if [[ "$no_check_certificate" == "1" ]]; then
   echo "wget certificate verification: disabled (--no-check-certificate)"
 elif [[ -n "$ca_certificate" ]]; then
@@ -218,12 +229,26 @@ if [[ "$check_only" -eq 0 ]]; then
   while true; do
     echo "Download pass $pass starting..."
     failures=0
+    pids=()
     while IFS= read -r path; do
       [[ -z "$path" ]] && continue
-      if ! download_one "$path"; then
-        failures=$((failures + 1))
+      download_one "$path" &
+      pids+=("$!")
+
+      if [[ "${#pids[@]}" -ge "$jobs" ]]; then
+        for pid in "${pids[@]}"; do
+          if ! wait "$pid"; then
+            failures=$((failures + 1))
+          fi
+        done
+        pids=()
       fi
     done < "$manifest"
+    for pid in "${pids[@]}"; do
+      if ! wait "$pid"; then
+        failures=$((failures + 1))
+      fi
+    done
 
     missing_now="$(missing_manifest_count)"
     parquet_now="$(parquet_count)"

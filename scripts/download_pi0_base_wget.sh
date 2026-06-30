@@ -26,6 +26,7 @@ Options:
                       meaning retry until complete.
   --retry-sleep SEC   Seconds to sleep between incomplete passes. Default: 60.
   --wget-tries N      Per-file wget tries in each pass. Default: 20.
+  --jobs N            Parallel wget jobs per pass. Default: 1.
   --download-only     Download JAX checkpoint, but do not convert.
   --force-convert     Re-run conversion even if model.safetensors already exists.
   --check-only        Do not download; only check local files.
@@ -44,6 +45,7 @@ Environment:
   DOWNLOAD_RETRY_SLEEP
                       Same as --retry-sleep.
   WGET_TRIES          Same as --wget-tries.
+  DOWNLOAD_JOBS       Same as --jobs.
 USAGE
 }
 
@@ -57,6 +59,7 @@ ca_certificate="${WGET_CA_CERTIFICATE:-}"
 max_passes="${DOWNLOAD_MAX_PASSES:-0}"
 retry_sleep="${DOWNLOAD_RETRY_SLEEP:-60}"
 wget_tries="${WGET_TRIES:-20}"
+jobs="${DOWNLOAD_JOBS:-1}"
 download_only=0
 force_convert=0
 check_only=0
@@ -99,6 +102,10 @@ while [[ $# -gt 0 ]]; do
       wget_tries="$2"
       shift 2
       ;;
+    --jobs)
+      jobs="$2"
+      shift 2
+      ;;
     --download-only)
       download_only=1
       shift
@@ -127,6 +134,10 @@ if [[ ! -f "$manifest" ]]; then
   echo "Manifest not found: $manifest" >&2
   exit 1
 fi
+if ! [[ "$jobs" =~ ^[0-9]+$ ]] || [[ "$jobs" -lt 1 ]]; then
+  echo "--jobs must be a positive integer, got: $jobs" >&2
+  exit 2
+fi
 
 if [[ -z "${OPENPI_DATA_HOME:-}" ]]; then
   if [[ -n "${OPENPI_CACHE:-}" ]]; then
@@ -148,7 +159,7 @@ echo "Manifest: $manifest"
 echo "Base URL: ${base_url%/}"
 echo "For later training shells: export OPENPI_DATA_HOME=\"$OPENPI_DATA_HOME\""
 echo "For training: --pytorch_weight_path \"$pt_dir\""
-echo "Retry policy: max_passes=$max_passes, retry_sleep=${retry_sleep}s, wget_tries=$wget_tries"
+echo "Retry policy: max_passes=$max_passes, retry_sleep=${retry_sleep}s, wget_tries=$wget_tries, jobs=$jobs"
 if [[ "$no_check_certificate" == "1" ]]; then
   echo "wget certificate verification: disabled (--no-check-certificate)"
 elif [[ -n "$ca_certificate" ]]; then
@@ -212,12 +223,26 @@ if [[ "$check_only" -eq 0 ]]; then
   while true; do
     echo "Download pass $pass starting..."
     failures=0
+    pids=()
     while IFS= read -r path; do
       [[ -z "$path" ]] && continue
-      if ! download_one "$path"; then
-        failures=$((failures + 1))
+      download_one "$path" &
+      pids+=("$!")
+
+      if [[ "${#pids[@]}" -ge "$jobs" ]]; then
+        for pid in "${pids[@]}"; do
+          if ! wait "$pid"; then
+            failures=$((failures + 1))
+          fi
+        done
+        pids=()
       fi
     done < "$manifest"
+    for pid in "${pids[@]}"; do
+      if ! wait "$pid"; then
+        failures=$((failures + 1))
+      fi
+    done
 
     missing_now="$(missing_manifest_count)"
     echo "Download pass $pass finished: failures=$failures, missing_manifest_files=$missing_now"
