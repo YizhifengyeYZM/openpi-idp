@@ -198,7 +198,13 @@ export LIBERO_DIR=$HF_LEROBOT_HOME/physical-intelligence/libero
 mkdir -p "$LIBERO_DIR"
 ```
 
-用当前 `uv` 环境生成 HuggingFace 文件清单：
+仓库已经带了一个静态文件清单：
+
+```bash
+wc -l docs/libero_hf_paths.txt
+```
+
+如果未来 HuggingFace 数据集有更新，再用当前 `uv` 环境重新生成清单：
 
 ```bash
 cd "$OPENPI_ROOT"
@@ -220,6 +226,12 @@ while IFS= read -r path; do
   wget -c --tries=20 --timeout=60 --waitretry=5 \
     -O "$LIBERO_DIR/$path" "$url"
 done < /tmp/libero_hf_paths.txt
+```
+
+如果使用仓库自带清单，把最后一行改成：
+
+```bash
+done < docs/libero_hf_paths.txt
 ```
 
 如果是私有网络必须带 HuggingFace token：
