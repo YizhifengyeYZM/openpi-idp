@@ -191,81 +191,50 @@ export LEROBOT_VIDEO_BACKEND=pyav
 
 `physical-intelligence/libero` 是 HuggingFace dataset repo，完整文件大约 33GB，约 1699 个文件。不要只下载前几十个 parquet；必须把 `data/` 和 `meta/` 都下全。
 
-把文件直接下载到 LeRobot 默认读取的位置：
+仓库里已经提供脚本和静态文件清单。先确认直连 HuggingFace 文件下载可用：
 
 ```bash
-export LIBERO_DIR=$HF_LEROBOT_HOME/physical-intelligence/libero
-mkdir -p "$LIBERO_DIR"
+wget --spider https://huggingface.co/datasets/physical-intelligence/libero/resolve/main/meta/info.json
 ```
 
-仓库已经带了一个静态文件清单：
-
-```bash
-wc -l docs/libero_hf_paths.txt
-```
-
-如果未来 HuggingFace 数据集有更新，再用当前 `uv` 环境重新生成清单：
+如果输出里有 `200 OK` 或 `Remote file exists`，直接跑：
 
 ```bash
 cd "$OPENPI_ROOT"
-
-uv run python - <<'PY' > /tmp/libero_hf_paths.txt
-from huggingface_hub import HfApi
-
-for path in HfApi().list_repo_files("physical-intelligence/libero", repo_type="dataset"):
-    print(path)
-PY
+OPENPI_CACHE="$OPENPI_CACHE" scripts/download_libero_wget.sh
 ```
 
-用 `wget` 按清单下载，支持断点续传：
+脚本会下载到：
 
-```bash
-while IFS= read -r path; do
-  mkdir -p "$LIBERO_DIR/$(dirname "$path")"
-  url="https://huggingface.co/datasets/physical-intelligence/libero/resolve/main/$path"
-  wget -c --tries=20 --timeout=60 --waitretry=5 \
-    -O "$LIBERO_DIR/$path" "$url"
-done < /tmp/libero_hf_paths.txt
+```text
+$HF_LEROBOT_HOME/physical-intelligence/libero
 ```
 
-如果使用仓库自带清单，把最后一行改成：
+也会自动检查：
 
-```bash
-done < docs/libero_hf_paths.txt
+```text
+1693 个 parquet
+meta/info.json
+HF_HUB_OFFLINE=1 的 LeRobotDataset 离线加载
 ```
 
-如果是私有网络必须带 HuggingFace token：
+如果只想检查本地文件，不下载：
 
 ```bash
-export HF_TOKEN=hf_xxx
-
-while IFS= read -r path; do
-  mkdir -p "$LIBERO_DIR/$(dirname "$path")"
-  url="https://huggingface.co/datasets/physical-intelligence/libero/resolve/main/$path"
-  wget -c --tries=20 --timeout=60 --waitretry=5 \
-    --header="Authorization: Bearer $HF_TOKEN" \
-    -O "$LIBERO_DIR/$path" "$url"
-done < /tmp/libero_hf_paths.txt
+scripts/download_libero_wget.sh --check-only
 ```
 
-检查下载结果：
+如果必须换下载源，例如公司内部镜像的 `resolve/main` 文件下载 URL，可显式传：
 
 ```bash
-find "$LIBERO_DIR/data" -name '*.parquet' | wc -l
-test -f "$LIBERO_DIR/meta/info.json" && echo "meta ok"
-du -sh "$LIBERO_DIR"
+scripts/download_libero_wget.sh \
+  --base-url https://huggingface.co/datasets/physical-intelligence/libero/resolve/main
 ```
 
-`parquet` 数量应为 1693。然后可以离线验证：
+当前观察到 `HF_ENDPOINT=http://mirrors.tools.huawei.com/huggingface` 会让 HuggingFace API 请求超时。使用本脚本下载时不需要设置 `HF_ENDPOINT`；如果之前设置过，先清掉：
 
 ```bash
-HF_HUB_OFFLINE=1 LEROBOT_VIDEO_BACKEND=pyav uv run python - <<'PY'
-from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
-
-ds = LeRobotDataset("physical-intelligence/libero")
-print("num_episodes:", ds.num_episodes)
-print("num_frames:", ds.num_frames)
-PY
+unset HF_ENDPOINT HF_HUB_ENDPOINT
 ```
 
 ## 4. 准备 pi0 base 的 PyTorch checkpoint
@@ -310,72 +279,30 @@ uv run examples/convert_jax_model_to_pytorch.py \
 
 ### 4.1 如果集群推荐用 wget 下载 pi0 base
 
-OpenPI 官方 `pi0_base` 在 GCS 上，但公开对象可以通过 `https://storage.googleapis.com/...` 直接下载。下载时仍然保持 checkpoint 根目录包含 `params/`：
+OpenPI 官方 `pi0_base` 在 GCS 上，但公开对象可以通过 `https://storage.googleapis.com/...` 直接下载。仓库里已经提供脚本和静态文件清单：
 
 ```bash
-export PI0_BASE_JAX=$OPENPI_DATA_HOME/openpi-assets/checkpoints/pi0_base
-mkdir -p "$PI0_BASE_JAX/params"
+cd "$OPENPI_ROOT"
+OPENPI_CACHE="$OPENPI_CACHE" scripts/download_pi0_base_wget.sh
 ```
 
-写入文件清单：
+脚本会完成两步：
 
-```bash
-cat > /tmp/pi0_base_jax_paths.txt <<'EOF'
-_CHECKPOINT_METADATA
-_METADATA
-_sharding
-d/85a4b908b188b86024ebb92e85065acd
-manifest.ocdbt
-ocdbt.process_0/d/085d261a6434a2182b9cf8204a14f929
-ocdbt.process_0/d/148068583a1e9abda7c46b410e91850f
-ocdbt.process_0/d/2f72ae7e4e549700e9d7da10816ed9a4
-ocdbt.process_0/d/309555f68bee51df688c4564b4d66fa5
-ocdbt.process_0/d/450c3d3cb6793dc644c1faf981296eb3
-ocdbt.process_0/d/45c6cbcc04a07d5f963bcf46cba903c4
-ocdbt.process_0/d/4e5aa230b6c768224fb6b77d78d6a1be
-ocdbt.process_0/d/5e775a3f399b6add8c3c8330df655e1b
-ocdbt.process_0/d/5f605020f3dadefc18287f67f369e264
-ocdbt.process_0/d/6629f15468f4d0cc39fb27518b7034a8
-ocdbt.process_0/d/808abec8853273a1e0076b0e42d19910
-ocdbt.process_0/d/8dd6f7ae99ab482b841a1eefa796bb41
-ocdbt.process_0/d/93fcf358bb740a5f61526a13e9a2c769
-ocdbt.process_0/d/99debaeabd76bd2cc1600905278c454b
-ocdbt.process_0/d/c5e0b7744afd7fde8b33a80d7f0329bc
-ocdbt.process_0/d/d5e67a46c20fea80fd9ccf63a434178c
-ocdbt.process_0/d/fc0caaf15ec5a8930e6d0a269722cbe6
-ocdbt.process_0/d/fec2923fef877d6b2a636a44d72670b8
-ocdbt.process_0/manifest.ocdbt
-EOF
+```text
+下载 JAX checkpoint 到 $OPENPI_DATA_HOME/openpi-assets/checkpoints/pi0_base
+转换 PyTorch checkpoint 到 $OPENPI_DATA_HOME/pytorch/pi0_base_pytorch
 ```
 
-用 `wget` 下载到 `params/`：
+如果只下载 JAX checkpoint，不转换：
 
 ```bash
-while IFS= read -r path; do
-  mkdir -p "$PI0_BASE_JAX/params/$(dirname "$path")"
-  url="https://storage.googleapis.com/openpi-assets/checkpoints/pi0_base/params/$path"
-  wget -c --tries=20 --timeout=60 --waitretry=5 \
-    -O "$PI0_BASE_JAX/params/$path" "$url"
-done < /tmp/pi0_base_jax_paths.txt
+scripts/download_pi0_base_wget.sh --download-only
 ```
 
-然后转换：
+如果转换中断，重新转换：
 
 ```bash
-export PI0_BASE_PT=$OPENPI_DATA_HOME/pytorch/pi0_base_pytorch
-mkdir -p "$(dirname "$PI0_BASE_PT")"
-
-uv run examples/convert_jax_model_to_pytorch.py \
-  --config_name pi0_libero \
-  --checkpoint_dir "$PI0_BASE_JAX" \
-  --output_path "$PI0_BASE_PT"
-```
-
-转换后确认：
-
-```bash
-test -f "$PI0_BASE_PT/model.safetensors" && echo "pi0 base pytorch ok"
-du -sh "$PI0_BASE_PT"
+scripts/download_pi0_base_wget.sh --force-convert
 ```
 
 ## 5. norm stats / assets
