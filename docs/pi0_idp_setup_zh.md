@@ -187,12 +187,81 @@ du -sh "$HF_HOME" || true
 export LEROBOT_VIDEO_BACKEND=pyav
 ```
 
+### 3.1 如果集群推荐用 wget 下载 LIBERO
+
+`physical-intelligence/libero` 是 HuggingFace dataset repo，完整文件大约 33GB，约 1699 个文件。不要只下载前几十个 parquet；必须把 `data/` 和 `meta/` 都下全。
+
+把文件直接下载到 LeRobot 默认读取的位置：
+
+```bash
+export LIBERO_DIR=$HF_LEROBOT_HOME/physical-intelligence/libero
+mkdir -p "$LIBERO_DIR"
+```
+
+用当前 `uv` 环境生成 HuggingFace 文件清单：
+
+```bash
+cd "$OPENPI_ROOT"
+
+uv run python - <<'PY' > /tmp/libero_hf_paths.txt
+from huggingface_hub import HfApi
+
+for path in HfApi().list_repo_files("physical-intelligence/libero", repo_type="dataset"):
+    print(path)
+PY
+```
+
+用 `wget` 按清单下载，支持断点续传：
+
+```bash
+while IFS= read -r path; do
+  mkdir -p "$LIBERO_DIR/$(dirname "$path")"
+  url="https://huggingface.co/datasets/physical-intelligence/libero/resolve/main/$path"
+  wget -c --tries=20 --timeout=60 --waitretry=5 \
+    -O "$LIBERO_DIR/$path" "$url"
+done < /tmp/libero_hf_paths.txt
+```
+
+如果是私有网络必须带 HuggingFace token：
+
+```bash
+export HF_TOKEN=hf_xxx
+
+while IFS= read -r path; do
+  mkdir -p "$LIBERO_DIR/$(dirname "$path")"
+  url="https://huggingface.co/datasets/physical-intelligence/libero/resolve/main/$path"
+  wget -c --tries=20 --timeout=60 --waitretry=5 \
+    --header="Authorization: Bearer $HF_TOKEN" \
+    -O "$LIBERO_DIR/$path" "$url"
+done < /tmp/libero_hf_paths.txt
+```
+
+检查下载结果：
+
+```bash
+find "$LIBERO_DIR/data" -name '*.parquet' | wc -l
+test -f "$LIBERO_DIR/meta/info.json" && echo "meta ok"
+du -sh "$LIBERO_DIR"
+```
+
+`parquet` 数量应为 1693。然后可以离线验证：
+
+```bash
+HF_HUB_OFFLINE=1 LEROBOT_VIDEO_BACKEND=pyav uv run python - <<'PY'
+from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+
+ds = LeRobotDataset("physical-intelligence/libero")
+print("num_episodes:", ds.num_episodes)
+print("num_frames:", ds.num_frames)
+PY
+```
+
 ## 4. 准备 pi0 base 的 PyTorch checkpoint
 
 `pi0_libero` 官方是从 `pi0_base` 大规模预训练 checkpoint 开始微调，不是从已经 LIBERO 微调过的模型开始。JAX checkpoint 地址是：
 
 ```text
-gs://openpi-assets/checkpoints/pi0_base/params
+gs://openpi-assets/checkpoints/pi0_base
 ```
 
 PyTorch 训练脚本需要先把它转换成 PyTorch 格式。推荐输出到大盘：
@@ -204,7 +273,7 @@ mkdir -p "$(dirname "$PI0_BASE_PT")"
 cd "$OPENPI_ROOT"
 uv run examples/convert_jax_model_to_pytorch.py \
   --config_name pi0_libero \
-  --checkpoint_dir gs://openpi-assets/checkpoints/pi0_base/params \
+  --checkpoint_dir gs://openpi-assets/checkpoints/pi0_base \
   --output_path "$PI0_BASE_PT"
 ```
 
@@ -223,8 +292,78 @@ gcloud storage cp -r gs://openpi-assets/checkpoints/pi0_base/params "$OPENPI_DAT
 
 uv run examples/convert_jax_model_to_pytorch.py \
   --config_name pi0_libero \
-  --checkpoint_dir "$OPENPI_DATA_HOME/jax/pi0_base/params" \
+  --checkpoint_dir "$OPENPI_DATA_HOME/jax/pi0_base" \
   --output_path "$PI0_BASE_PT"
+```
+
+### 4.1 如果集群推荐用 wget 下载 pi0 base
+
+OpenPI 官方 `pi0_base` 在 GCS 上，但公开对象可以通过 `https://storage.googleapis.com/...` 直接下载。下载时仍然保持 checkpoint 根目录包含 `params/`：
+
+```bash
+export PI0_BASE_JAX=$OPENPI_DATA_HOME/openpi-assets/checkpoints/pi0_base
+mkdir -p "$PI0_BASE_JAX/params"
+```
+
+写入文件清单：
+
+```bash
+cat > /tmp/pi0_base_jax_paths.txt <<'EOF'
+_CHECKPOINT_METADATA
+_METADATA
+_sharding
+d/85a4b908b188b86024ebb92e85065acd
+manifest.ocdbt
+ocdbt.process_0/d/085d261a6434a2182b9cf8204a14f929
+ocdbt.process_0/d/148068583a1e9abda7c46b410e91850f
+ocdbt.process_0/d/2f72ae7e4e549700e9d7da10816ed9a4
+ocdbt.process_0/d/309555f68bee51df688c4564b4d66fa5
+ocdbt.process_0/d/450c3d3cb6793dc644c1faf981296eb3
+ocdbt.process_0/d/45c6cbcc04a07d5f963bcf46cba903c4
+ocdbt.process_0/d/4e5aa230b6c768224fb6b77d78d6a1be
+ocdbt.process_0/d/5e775a3f399b6add8c3c8330df655e1b
+ocdbt.process_0/d/5f605020f3dadefc18287f67f369e264
+ocdbt.process_0/d/6629f15468f4d0cc39fb27518b7034a8
+ocdbt.process_0/d/808abec8853273a1e0076b0e42d19910
+ocdbt.process_0/d/8dd6f7ae99ab482b841a1eefa796bb41
+ocdbt.process_0/d/93fcf358bb740a5f61526a13e9a2c769
+ocdbt.process_0/d/99debaeabd76bd2cc1600905278c454b
+ocdbt.process_0/d/c5e0b7744afd7fde8b33a80d7f0329bc
+ocdbt.process_0/d/d5e67a46c20fea80fd9ccf63a434178c
+ocdbt.process_0/d/fc0caaf15ec5a8930e6d0a269722cbe6
+ocdbt.process_0/d/fec2923fef877d6b2a636a44d72670b8
+ocdbt.process_0/manifest.ocdbt
+EOF
+```
+
+用 `wget` 下载到 `params/`：
+
+```bash
+while IFS= read -r path; do
+  mkdir -p "$PI0_BASE_JAX/params/$(dirname "$path")"
+  url="https://storage.googleapis.com/openpi-assets/checkpoints/pi0_base/params/$path"
+  wget -c --tries=20 --timeout=60 --waitretry=5 \
+    -O "$PI0_BASE_JAX/params/$path" "$url"
+done < /tmp/pi0_base_jax_paths.txt
+```
+
+然后转换：
+
+```bash
+export PI0_BASE_PT=$OPENPI_DATA_HOME/pytorch/pi0_base_pytorch
+mkdir -p "$(dirname "$PI0_BASE_PT")"
+
+uv run examples/convert_jax_model_to_pytorch.py \
+  --config_name pi0_libero \
+  --checkpoint_dir "$PI0_BASE_JAX" \
+  --output_path "$PI0_BASE_PT"
+```
+
+转换后确认：
+
+```bash
+test -f "$PI0_BASE_PT/model.safetensors" && echo "pi0 base pytorch ok"
+du -sh "$PI0_BASE_PT"
 ```
 
 ## 5. norm stats / assets
@@ -727,4 +866,3 @@ export XDG_CACHE_HOME=$OPENPI_CACHE/xdg
 3. `pytorch_loss_type=idp_geo`：加入基于 context 的对角几何权重，只对真实 LIBERO 7 维 action 计算几何。
 4. `pytorch_freeze_paligemma=True`：可选冻结 PaliGemma trunk，只训练 action expert / projection，用于消融。
 5. serve 时会从 checkpoint metadata 自动恢复 `pytorch_loss_type` 等字段；也可以用 `OPENPI_PYTORCH_LOSS_TYPE` 强制覆盖。
-
