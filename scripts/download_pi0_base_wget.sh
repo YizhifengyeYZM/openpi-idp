@@ -22,6 +22,10 @@ Options:
                       HTTPS inspection gateway with an untrusted internal CA.
   --ca-certificate FILE
                       Pass wget --ca-certificate FILE.
+  --max-passes N      Number of manifest passes before giving up. Default: 0,
+                      meaning retry until complete.
+  --retry-sleep SEC   Seconds to sleep between incomplete passes. Default: 60.
+  --wget-tries N      Per-file wget tries in each pass. Default: 20.
   --download-only     Download JAX checkpoint, but do not convert.
   --force-convert     Re-run conversion even if model.safetensors already exists.
   --check-only        Do not download; only check local files.
@@ -36,6 +40,10 @@ Environment:
   WGET_NO_CHECK_CERTIFICATE=1
                       Same as --no-check-certificate.
   WGET_CA_CERTIFICATE Same as --ca-certificate.
+  DOWNLOAD_MAX_PASSES Same as --max-passes.
+  DOWNLOAD_RETRY_SLEEP
+                      Same as --retry-sleep.
+  WGET_TRIES          Same as --wget-tries.
 USAGE
 }
 
@@ -46,6 +54,9 @@ jax_dir="${PI0_BASE_JAX:-}"
 pt_dir="${PI0_BASE_PT:-}"
 no_check_certificate="${WGET_NO_CHECK_CERTIFICATE:-0}"
 ca_certificate="${WGET_CA_CERTIFICATE:-}"
+max_passes="${DOWNLOAD_MAX_PASSES:-0}"
+retry_sleep="${DOWNLOAD_RETRY_SLEEP:-60}"
+wget_tries="${WGET_TRIES:-20}"
 download_only=0
 force_convert=0
 check_only=0
@@ -74,6 +85,18 @@ while [[ $# -gt 0 ]]; do
       ;;
     --ca-certificate)
       ca_certificate="$2"
+      shift 2
+      ;;
+    --max-passes)
+      max_passes="$2"
+      shift 2
+      ;;
+    --retry-sleep)
+      retry_sleep="$2"
+      shift 2
+      ;;
+    --wget-tries)
+      wget_tries="$2"
       shift 2
       ;;
     --download-only)
@@ -125,6 +148,7 @@ echo "Manifest: $manifest"
 echo "Base URL: ${base_url%/}"
 echo "For later training shells: export OPENPI_DATA_HOME=\"$OPENPI_DATA_HOME\""
 echo "For training: --pytorch_weight_path \"$pt_dir\""
+echo "Retry policy: max_passes=$max_passes, retry_sleep=${retry_sleep}s, wget_tries=$wget_tries"
 if [[ "$no_check_certificate" == "1" ]]; then
   echo "wget certificate verification: disabled (--no-check-certificate)"
 elif [[ -n "$ca_certificate" ]]; then
@@ -147,7 +171,7 @@ download_one() {
   echo "[download] $path"
   local args=(
     -c
-    --tries=0
+    --tries="$wget_tries"
     --connect-timeout=30
     --read-timeout=120
     --waitretry=10
@@ -162,27 +186,60 @@ download_one() {
     args=(--ca-certificate="$ca_certificate" "${args[@]}")
   fi
 
-  wget "${args[@]}"
-  mv "$tmp" "$out"
+  if wget "${args[@]}"; then
+    mv "$tmp" "$out"
+    return 0
+  fi
+
+  echo "[warn] wget failed for $path; keeping partial file for a later retry." >&2
+  return 1
+}
+
+missing_manifest_count() {
+  local missing=0
+  local path
+  while IFS= read -r path; do
+    [[ -z "$path" ]] && continue
+    if [[ ! -f "$jax_dir/params/$path" ]]; then
+      missing=$((missing + 1))
+    fi
+  done < "$manifest"
+  echo "$missing"
 }
 
 if [[ "$check_only" -eq 0 ]]; then
-  while IFS= read -r path; do
-    [[ -z "$path" ]] && continue
-    download_one "$path"
-  done < "$manifest"
+  pass=1
+  while true; do
+    echo "Download pass $pass starting..."
+    failures=0
+    while IFS= read -r path; do
+      [[ -z "$path" ]] && continue
+      if ! download_one "$path"; then
+        failures=$((failures + 1))
+      fi
+    done < "$manifest"
+
+    missing_now="$(missing_manifest_count)"
+    echo "Download pass $pass finished: failures=$failures, missing_manifest_files=$missing_now"
+
+    if [[ "$missing_now" == "0" ]]; then
+      break
+    fi
+
+    if [[ "$max_passes" != "0" && "$pass" -ge "$max_passes" ]]; then
+      echo "Reached --max-passes=$max_passes with missing files remaining." >&2
+      break
+    fi
+
+    echo "Sleeping ${retry_sleep}s before retrying incomplete files..."
+    sleep "$retry_sleep"
+    pass=$((pass + 1))
+  done
 fi
 
-missing=0
-while IFS= read -r path; do
-  [[ -z "$path" ]] && continue
-  if [[ ! -f "$jax_dir/params/$path" ]]; then
-    echo "Missing: $jax_dir/params/$path" >&2
-    missing=1
-  fi
-done < "$manifest"
-
-if [[ "$missing" -ne 0 ]]; then
+missing="$(missing_manifest_count)"
+echo "Manifest files missing: $missing"
+if [[ "$missing" != "0" ]]; then
   echo "pi0 base JAX checkpoint is incomplete. Re-run this script to resume." >&2
   exit 1
 fi

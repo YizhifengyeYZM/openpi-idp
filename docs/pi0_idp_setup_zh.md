@@ -204,6 +204,8 @@ cd "$OPENPI_ROOT"
 OPENPI_CACHE="$OPENPI_CACHE" scripts/download_libero_wget.sh
 ```
 
+脚本默认会自动恢复中断下载：每个文件用 `wget -c` 断点续传；某个文件失败不会导致整个脚本退出；一轮扫完整个清单后如果还有缺失文件，会等待 60 秒后继续下一轮，直到下载完整为止。
+
 如果 `wget` 报公司网关自签证书，例如 `Self-signed certificate encountered`，先尝试找管理员要公司 CA 文件，然后：
 
 ```bash
@@ -216,6 +218,15 @@ OPENPI_CACHE="$OPENPI_CACHE" scripts/download_libero_wget.sh \
 ```bash
 OPENPI_CACHE="$OPENPI_CACHE" scripts/download_libero_wget.sh \
   --no-check-certificate
+```
+
+如果想限制最多重试 20 轮，每轮之间等 120 秒：
+
+```bash
+OPENPI_CACHE="$OPENPI_CACHE" scripts/download_libero_wget.sh \
+  --no-check-certificate \
+  --max-passes 20 \
+  --retry-sleep 120
 ```
 
 脚本会下载到：
@@ -299,6 +310,8 @@ OpenPI 官方 `pi0_base` 在 GCS 上，但公开对象可以通过 `https://stor
 cd "$OPENPI_ROOT"
 OPENPI_CACHE="$OPENPI_CACHE" scripts/download_pi0_base_wget.sh
 ```
+
+这个脚本也使用同样的自动恢复机制：断点续传、失败后进入下一轮、直到文件清单完整才开始转换 PyTorch checkpoint。
 
 如果同样遇到公司网关自签证书：
 
